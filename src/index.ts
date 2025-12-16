@@ -146,11 +146,11 @@ async function fetchVideoMetadata(
 			body: JSON.stringify({
 				operationName: "GetVideoInfo",
 				variables: {
-					videoId: videoId,
+					id: videoId,
 					password: null,
 				},
-				query: `query GetVideoInfo($videoId: ID!, $password: String) {
-  getVideo(id: $videoId, password: $password) {
+				query: `query GetVideoInfo($id: ID!, $password: String) {
+  getVideo(id: $id, password: $password) {
     ... on RegularUserVideo {
       id
       name
