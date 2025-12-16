@@ -274,7 +274,7 @@ fragment CommentReplyFragment on PublicVideoComment {
 }
 
 // Define our MCP agent with Loom transcript tools
-export class LoomMCP extends McpAgent {
+export class MyMCP extends McpAgent {
 	server = new McpServer({
 		name: "loom-transcript",
 		version: "1.0.0",
@@ -426,11 +426,11 @@ export default {
 		const url = new URL(request.url);
 
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-			return LoomMCP.serveSSE("/sse").fetch(request, env, ctx);
+			return MyMCP.serveSSE("/sse").fetch(request, env, ctx);
 		}
 
 		if (url.pathname === "/mcp") {
-			return LoomMCP.serve("/mcp").fetch(request, env, ctx);
+			return MyMCP.serve("/mcp").fetch(request, env, ctx);
 		}
 
 		return new Response("Loom Transcript MCP Server - Use /sse or /mcp endpoints", { status: 200 });
