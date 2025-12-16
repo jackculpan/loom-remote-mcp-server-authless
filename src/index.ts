@@ -24,14 +24,13 @@ async function fetchTranscriptUrl(videoId: string): Promise<string | null> {
 				"Content-Type": "application/json",
 				"User-Agent": "loom-transcript-mcp/1.0.0",
 			},
-			body: JSON.stringify([
-				{
-					operationName: "FetchVideoTranscript",
-					variables: {
-						videoId: videoId,
-						password: null,
-					},
-					query: `query FetchVideoTranscript($videoId: ID!, $password: String) {
+			body: JSON.stringify({
+				operationName: "FetchVideoTranscript",
+				variables: {
+					videoId: videoId,
+					password: null,
+				},
+				query: `query FetchVideoTranscript($videoId: ID!, $password: String) {
           fetchVideoTranscript(videoId: $videoId, password: $password) {
             ... on VideoTranscriptDetails {
               id
@@ -59,22 +58,21 @@ async function fetchTranscriptUrl(videoId: string): Promise<string | null> {
             __typename
           }
         }`,
-				},
-			]),
+			}),
 		});
 
-		const data = (await response.json()) as Array<{
+		const data = (await response.json()) as {
 			data?: {
 				fetchVideoTranscript?: {
 					captions_source_url?: string;
 				};
 			};
-		}>;
+		};
 
 		console.log("API Response:", JSON.stringify(data, null, 2));
 
-		if (data && data[0]?.data?.fetchVideoTranscript?.captions_source_url) {
-			return data[0].data.fetchVideoTranscript.captions_source_url;
+		if (data?.data?.fetchVideoTranscript?.captions_source_url) {
+			return data.data.fetchVideoTranscript.captions_source_url;
 		}
 
 		return null;
@@ -126,6 +124,78 @@ function parseVttToText(vttContent: string): string {
 	}
 
 	return transcript.trim();
+}
+
+// Types for video metadata
+interface VideoMetadata {
+	title: string;
+	description: string | null;
+}
+
+// Function to fetch video metadata from Loom API
+async function fetchVideoMetadata(
+	videoId: string,
+): Promise<VideoMetadata | null> {
+	try {
+		const response = await fetch("https://www.loom.com/graphql", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"User-Agent": "loom-transcript-mcp/1.0.0",
+			},
+			body: JSON.stringify({
+				operationName: "GetVideoInfo",
+				variables: {
+					videoId: videoId,
+					password: null,
+				},
+				query: `query GetVideoInfo($videoId: ID!, $password: String) {
+  getVideo(id: $videoId, password: $password) {
+    ... on RegularUserVideo {
+      id
+      name
+      description
+      __typename
+    }
+    ... on PrivateVideo {
+      id
+      __typename
+    }
+    ... on CMSUserVideo {
+      id
+      name
+      description
+      __typename
+    }
+    __typename
+  }
+}`,
+			}),
+		});
+
+		const data = (await response.json()) as {
+			data?: {
+				getVideo?: {
+					name?: string;
+					description?: string;
+				};
+			};
+		};
+
+		console.log("Video metadata response:", JSON.stringify(data, null, 2));
+
+		if (data?.data?.getVideo?.name) {
+			return {
+				title: data.data.getVideo.name,
+				description: data.data.getVideo.description || null,
+			};
+		}
+
+		return null;
+	} catch (error) {
+		console.error("Error fetching video metadata:", error);
+		return null;
+	}
 }
 
 // Types for video comments
@@ -180,14 +250,13 @@ async function fetchVideoComments(
 				"Content-Type": "application/json",
 				"User-Agent": "loom-transcript-mcp/1.0.0",
 			},
-			body: JSON.stringify([
-				{
-					operationName: "fetchVideoComments",
-					variables: {
-						id: videoId,
-						password: null,
-					},
-					query: `query fetchVideoComments($id: ID!, $password: String) {
+			body: JSON.stringify({
+				operationName: "fetchVideoComments",
+				variables: {
+					id: videoId,
+					password: null,
+				},
+				query: `query fetchVideoComments($id: ID!, $password: String) {
   video: getVideo(id: $id, password: $password) {
     __typename
     ... on RegularUserVideo {
@@ -248,22 +317,21 @@ fragment CommentReplyFragment on PublicVideoComment {
   extended_reaction
   __typename
 }`,
-				},
-			]),
+			}),
 		});
 
-		const data = (await response.json()) as Array<{
+		const data = (await response.json()) as {
 			data?: {
 				video?: {
 					video_comments?: VideoComment[];
 				};
 			};
-		}>;
+		};
 
 		console.log("API Response:", JSON.stringify(data, null, 2));
 
-		if (data && data[0]?.data?.video?.video_comments) {
-			return data[0].data.video.video_comments;
+		if (data?.data?.video?.video_comments) {
+			return data.data.video.video_comments;
 		}
 
 		return null;
@@ -284,7 +352,7 @@ export class MyMCP extends McpAgent {
 		// Tool to get Loom transcript
 		this.server.tool(
 			"getLoomTranscript",
-			"Get transcript text from a Loom video URL",
+			"Get transcript text, title, and description from a Loom video URL",
 			{
 				videoUrl: z
 					.string()
@@ -311,8 +379,13 @@ export class MyMCP extends McpAgent {
 						};
 					}
 
-					// Fetch transcript URL
-					const captionsUrl = await fetchTranscriptUrl(videoId);
+					// Fetch video metadata and transcript URL in parallel
+					const [metadata, captionsUrl] = await Promise.all([
+						fetchVideoMetadata(videoId),
+						fetchTranscriptUrl(videoId),
+					]);
+
+					console.log("Metadata:", metadata);
 					console.log("Captions URL:", captionsUrl);
 
 					if (!captionsUrl) {
@@ -330,11 +403,22 @@ export class MyMCP extends McpAgent {
 					const transcriptText = await fetchVttContent(captionsUrl);
 					console.log("Transcript length:", transcriptText.length);
 
+					// Build response with metadata and transcript
+					let responseText = "";
+					if (metadata) {
+						responseText += `# ${metadata.title}\n\n`;
+						if (metadata.description) {
+							responseText += `**Description:** ${metadata.description}\n\n`;
+						}
+						responseText += `---\n\n## Transcript\n\n`;
+					}
+					responseText += transcriptText;
+
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: transcriptText,
+								text: responseText,
 							},
 						],
 					};
