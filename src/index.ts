@@ -1,5 +1,5 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { McpAgent } from "agents/mcp";
+import { McpServer } from "@modelcontextprotocol/server";
+import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 
 // Function to extract video ID from Loom URL
@@ -127,10 +127,19 @@ function parseVttToText(vttContent: string): string {
 }
 
 // Types for video metadata
+interface VideoThumbnails {
+	staticUrl: string | null;
+	animatedUrl: string | null;
+	withPlayUrl: string | null;
+}
+
 interface VideoMetadata {
 	title: string;
 	description: string | null;
+	thumbnails: VideoThumbnails;
 }
+
+const LOOM_CDN_BASE = "https://cdn.loom.com/";
 
 // Function to fetch video metadata from Loom API
 async function fetchVideoMetadata(
@@ -155,6 +164,13 @@ async function fetchVideoMetadata(
       id
       name
       description
+      defaultThumbnails {
+        default
+        static
+      }
+      signedThumbnails {
+        defaultGifPlay
+      }
       __typename
     }
     ... on PrivateVideo {
@@ -178,16 +194,35 @@ async function fetchVideoMetadata(
 				getVideo?: {
 					name?: string;
 					description?: string;
+					defaultThumbnails?: {
+						default?: string;
+						static?: string;
+					};
+					signedThumbnails?: {
+						defaultGifPlay?: string;
+					};
 				};
 			};
 		};
 
 		console.log("Video metadata response:", JSON.stringify(data, null, 2));
 
-		if (data?.data?.getVideo?.name) {
+		const video = data?.data?.getVideo;
+		if (video?.name) {
 			return {
-				title: data.data.getVideo.name,
-				description: data.data.getVideo.description || null,
+				title: video.name,
+				description: video.description || null,
+				thumbnails: {
+					staticUrl: video.defaultThumbnails?.static
+						? LOOM_CDN_BASE + video.defaultThumbnails.static
+						: null,
+					animatedUrl: video.defaultThumbnails?.default
+						? LOOM_CDN_BASE + video.defaultThumbnails.default
+						: null,
+					withPlayUrl: video.signedThumbnails?.defaultGifPlay
+						? LOOM_CDN_BASE + video.signedThumbnails.defaultGifPlay
+						: null,
+				},
 			};
 		}
 
@@ -341,182 +376,307 @@ fragment CommentReplyFragment on PublicVideoComment {
 	}
 }
 
-// Define our MCP agent with Loom transcript tools
-export class MyMCP extends McpAgent {
-	server = new McpServer({
+// Create a fresh MCP server for each request (stateless, no Durable Object)
+function createServer(): McpServer {
+	const server = new McpServer({
 		name: "loom-transcript",
 		version: "1.0.0",
 	});
 
-	async init() {
-		// Tool to get Loom transcript
-		this.server.tool(
-			"getLoomTranscript",
-			"Get transcript text, title, and description from a Loom video URL",
-			{
+	server.registerTool(
+		"getLoomTranscript",
+		{
+			description:
+				"Get transcript text, title, and description from a Loom video URL",
+			inputSchema: {
 				videoUrl: z
 					.string()
 					.describe(
 						"The Loom video URL (e.g., https://www.loom.com/share/123456)",
 					),
 			},
-			async ({ videoUrl }) => {
-				try {
-					console.log("Processing video URL:", videoUrl);
+		},
+		async ({ videoUrl }) => {
+			try {
+				console.log("Processing video URL:", videoUrl);
 
-					// Extract video ID from URL
-					const videoId = extractVideoId(videoUrl);
-					console.log("Extracted video ID:", videoId);
+				// Extract video ID from URL
+				const videoId = extractVideoId(videoUrl);
+				console.log("Extracted video ID:", videoId);
 
-					if (!videoId) {
-						return {
-							content: [
-								{
-									type: "text" as const,
-									text: "Error: Could not extract video ID from the provided URL.",
-								},
-							],
-						};
-					}
-
-					// Fetch video metadata and transcript URL in parallel
-					const [metadata, captionsUrl] = await Promise.all([
-						fetchVideoMetadata(videoId),
-						fetchTranscriptUrl(videoId),
-					]);
-
-					console.log("Metadata:", metadata);
-					console.log("Captions URL:", captionsUrl);
-
-					if (!captionsUrl) {
-						return {
-							content: [
-								{
-									type: "text" as const,
-									text: "Error: Could not fetch transcript for this video.",
-								},
-							],
-						};
-					}
-
-					// Fetch and parse VTT content
-					const transcriptText = await fetchVttContent(captionsUrl);
-					console.log("Transcript length:", transcriptText.length);
-
-					// Build response with metadata and transcript
-					let responseText = "";
-					if (metadata) {
-						responseText += `# ${metadata.title}\n\n`;
-						if (metadata.description) {
-							responseText += `**Description:** ${metadata.description}\n\n`;
-						}
-						responseText += `---\n\n## Transcript\n\n`;
-					}
-					responseText += transcriptText;
-
+				if (!videoId) {
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: responseText,
-							},
-						],
-					};
-				} catch (error) {
-					console.error("Error in handler:", error);
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+								text: "Error: Could not extract video ID from the provided URL.",
 							},
 						],
 					};
 				}
-			},
-		);
 
-		// Tool to get Loom comments
-		this.server.tool(
-			"getLoomComments",
-			"Get comments from a Loom video URL",
-			{
+				// Fetch video metadata and transcript URL in parallel
+				const [metadata, captionsUrl] = await Promise.all([
+					fetchVideoMetadata(videoId),
+					fetchTranscriptUrl(videoId),
+				]);
+
+				console.log("Metadata:", metadata);
+				console.log("Captions URL:", captionsUrl);
+
+				if (!captionsUrl) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: "Error: Could not fetch transcript for this video.",
+							},
+						],
+					};
+				}
+
+				// Fetch and parse VTT content
+				const transcriptText = await fetchVttContent(captionsUrl);
+				console.log("Transcript length:", transcriptText.length);
+
+				// Build response with metadata and transcript
+				let responseText = "";
+				if (metadata) {
+					responseText += `# ${metadata.title}\n\n`;
+					if (metadata.description) {
+						responseText += `**Description:** ${metadata.description}\n\n`;
+					}
+					responseText += `---\n\n## Transcript\n\n`;
+				}
+				responseText += transcriptText;
+
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: responseText,
+						},
+					],
+				};
+			} catch (error) {
+				console.error("Error in handler:", error);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+						},
+					],
+				};
+			}
+		},
+	);
+
+	// Tool to get Loom comments
+	server.registerTool(
+		"getLoomComments",
+		{
+			description: "Get comments from a Loom video URL",
+			inputSchema: {
 				videoUrl: z
 					.string()
 					.describe(
 						"The Loom video URL (e.g., https://www.loom.com/share/123456)",
 					),
 			},
-			async ({ videoUrl }) => {
-				try {
-					console.log("Processing video URL for comments:", videoUrl);
+		},
+		async ({ videoUrl }) => {
+			try {
+				console.log("Processing video URL for comments:", videoUrl);
 
-					// Extract video ID from URL
-					const videoId = extractVideoId(videoUrl);
-					console.log("Extracted video ID:", videoId);
+				// Extract video ID from URL
+				const videoId = extractVideoId(videoUrl);
+				console.log("Extracted video ID:", videoId);
 
-					if (!videoId) {
-						return {
-							content: [
-								{
-									type: "text" as const,
-									text: "Error: Could not extract video ID from the provided URL.",
-								},
-							],
-						};
-					}
-
-					// Fetch video comments
-					const comments = await fetchVideoComments(videoId);
-					console.log("Comments fetched:", comments);
-
-					if (!comments) {
-						return {
-							content: [
-								{
-									type: "text" as const,
-									text: "Error: Could not fetch comments for this video.",
-								},
-							],
-						};
-					}
-
+				if (!videoId) {
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: JSON.stringify(comments, null, 2),
-							},
-						],
-					};
-				} catch (error) {
-					console.error("Error in comments handler:", error);
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+								text: "Error: Could not extract video ID from the provided URL.",
 							},
 						],
 					};
 				}
+
+				// Fetch video comments
+				const comments = await fetchVideoComments(videoId);
+				console.log("Comments fetched:", comments);
+
+				if (!comments) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: "Error: Could not fetch comments for this video.",
+							},
+						],
+					};
+				}
+
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: JSON.stringify(comments, null, 2),
+						},
+					],
+				};
+			} catch (error) {
+				console.error("Error in comments handler:", error);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+						},
+					],
+				};
+			}
+		},
+	);
+
+	// Tool to get Loom snapshot/thumbnail image
+	server.registerTool(
+		"getLoomSnapshot",
+		{
+			description:
+				"Get a visual snapshot/thumbnail image from a Loom video. Returns the static thumbnail image so you can see what the video shows.",
+			inputSchema: {
+				videoUrl: z
+					.string()
+					.describe(
+						"The Loom video URL (e.g., https://www.loom.com/share/123456)",
+					),
 			},
-		);
-	}
+		},
+		async ({ videoUrl }) => {
+			try {
+				console.log("Processing video URL for snapshot:", videoUrl);
+
+				// Extract video ID from URL
+				const videoId = extractVideoId(videoUrl);
+				console.log("Extracted video ID:", videoId);
+
+				if (!videoId) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: "Error: Could not extract video ID from the provided URL.",
+							},
+						],
+					};
+				}
+
+				// Fetch video metadata to get thumbnail URLs
+				const metadata = await fetchVideoMetadata(videoId);
+				console.log("Metadata:", metadata);
+
+				if (!metadata) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: "Error: Could not fetch video metadata.",
+							},
+						],
+					};
+				}
+
+				const thumbnailUrl = metadata.thumbnails.staticUrl;
+				if (!thumbnailUrl) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: "Error: No thumbnail available for this video.",
+							},
+						],
+					};
+				}
+
+				// Fetch the thumbnail image
+				console.log("Fetching thumbnail from:", thumbnailUrl);
+				const imageResponse = await fetch(thumbnailUrl);
+
+				if (!imageResponse.ok) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Error: Failed to fetch thumbnail image (${imageResponse.status})`,
+							},
+						],
+					};
+				}
+
+				// Convert to base64
+				const imageBuffer = await imageResponse.arrayBuffer();
+				const base64Image = btoa(
+					String.fromCharCode(...new Uint8Array(imageBuffer)),
+				);
+
+				// Determine mime type from URL
+				const mimeType = thumbnailUrl.endsWith(".gif")
+					? "image/gif"
+					: "image/jpeg";
+
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `# ${metadata.title}\n\n${metadata.description ? `**Description:** ${metadata.description}\n\n` : ""}**Thumbnail URLs:**\n- Static: ${metadata.thumbnails.staticUrl}\n- Animated: ${metadata.thumbnails.animatedUrl}\n- With Play Button: ${metadata.thumbnails.withPlayUrl}`,
+						},
+						{
+							type: "image" as const,
+							data: base64Image,
+							mimeType: mimeType,
+						},
+					],
+				};
+			} catch (error) {
+				console.error("Error in snapshot handler:", error);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
+						},
+					],
+				};
+			}
+		},
+	);
+
+	return server;
 }
+
+const handleMcp = createMcpHandler(createServer, { route: "/mcp" });
 
 export default {
 	fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		const url = new URL(request.url);
 
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
-			return MyMCP.serveSSE("/sse").fetch(request, env, ctx);
+			return new Response(
+				"The /sse transport has been retired. Connect using streamable HTTP at /mcp instead.",
+				{ status: 410 },
+			);
 		}
 
 		if (url.pathname === "/mcp") {
-			return MyMCP.serve("/mcp").fetch(request, env, ctx);
+			return handleMcp(request, env, ctx);
 		}
 
-		return new Response("Loom Transcript MCP Server - Use /sse or /mcp endpoints", { status: 200 });
+		return new Response(
+			"Loom Transcript MCP Server - Use the /mcp endpoint (streamable HTTP)",
+			{ status: 200 },
+		);
 	},
 };
